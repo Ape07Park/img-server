@@ -1,0 +1,51 @@
+@startuml
+' 스타일 설정 (가독성을 위해 추가)
+skinparam responseMessageBelowArrow true
+skinparam maxMessageSize 200
+skinparam participantPadding 20
+skinparam boxPadding 10
+
+autonumber
+
+' 참여자 정의
+actor "👨‍💻 개발자 A (Client)" as DevA
+participant "🚀 Nginx (Web Server)\n(Port 80)" as Nginx
+participant "🍃 Spring Boot (WAS)\n(Port 8080)" as Boot
+database "💿 Ubuntu File System\n(/var/www/images)" as Disk
+actor "👨‍💻 개발자 B (Browser)" as DevB
+
+' === 1단계: 이미지 업로드 ===
+== 1단계: 이미지 업로드 (Write) ==
+
+DevA -> Boot : POST /api/v1/images\n(파일, project='shop')
+activate Boot
+
+Boot -> Boot : 1. 파일명 난수화 (UUID 생성)\n2. 프로젝트 폴더 확인
+Boot -> Disk : 파일 저장 (write)
+Disk --> Boot : 저장 완료
+
+Boot --> DevA : 응답: { "url": "http://IP주소/images/shop/uuid.jpg" }
+deactivate Boot
+
+note right of DevA #Yellow
+  개발자 A는 반환받은 URL을
+  자신의 DB에 문자열로 저장함
+end note
+
+' === 2단계: 이미지 조회 ===
+== 2단계: 이미지 조회 (Read) - Spring Boot를 거치지 않음! ==
+
+DevB -> Nginx : GET http://IP주소/images/shop/uuid.jpg
+activate Nginx
+
+note right of Nginx #SkyBlue
+  /images 요청을 감지하고
+  로컬 디스크 경로로 매핑 (Alias)
+end note
+
+Nginx -> Disk : 파일 읽기 (read)
+Disk --> Nginx : 파일 데이터 스트림
+Nginx --> DevB : 이미지 파일 전송 (200 OK)
+deactivate Nginx
+
+@enduml
