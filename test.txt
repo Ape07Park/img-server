@@ -1,0 +1,166 @@
+데이터 흐름 설계
+
+일반적으로 업로드 먼저, DB 저장 나중 순서가 맞습니다.
+
+권장 흐름
+
+Client
+│
+│ POST /upload (multipart)
+▼
+Main Application (당신의 서비스)
+│
+│ 1. 파일 유효성 검사
+│
+│ 2. img-server로 업로드 요청
+│    POST http://img-server/api/v1/images?project=xxx
+▼
+img-server (현재 이 레포)
+│
+│ 파일 저장 → { fileName, url } 반환
+▼
+Main Application
+│
+│ 3. 반환된 fileName, url로 Attachment 엔티티 구성
+│ 4. DB에 Attachment INSERT
+│
+│ 5. 클라이언트에 응답 반환
+▼
+Client
+
+왜 DB 저장을 나중에 하는가?
+
+┌─────────────────┬─────────────────────────────────────┬───────────────────────────────────────┐
+│    시나리오     │            DB 먼저 저장             │              업로드 먼저              │
+├─────────────────┼─────────────────────────────────────┼───────────────────────────────────────┤
+│ 업로드 실패 시  │ DB에 orphan 레코드 남음 (처리 복잡) │ DB 변경 없음 (깔끔)                   │
+├─────────────────┼─────────────────────────────────────┼───────────────────────────────────────┤
+│ DB 저장 실패 시 │ -                                   │ 파일만 고아로 남음 (배치로 정리 가능) │
+├─────────────────┼─────────────────────────────────────┼───────────────────────────────────────┤
+│ 트랜잭션        │ 파일은 트랜잭션 밖                  │ DB만 트랜잭션으로 보호                │
+└─────────────────┴─────────────────────────────────────┴───────────────────────────────────────┘
+
+Attachment 필드 매핑
+
+img-server가 반환하는 값 → Attachment 필드:
+
+img-server 응답 { fileName, url }
+│       │
+│       └──→ realUrl
+│
+└──→ uploadName  (uuid.ext 형태)
+uuid        (파싱)
+extension   (파싱)
+path        (date-based 경로: project/year/month/day/)
+
+주의사항
+
+- img-server 업로드가 성공했더라도 DB 저장 실패 시 파일은 고아 상태가 됩니다. 이를 위해 주기적으로
+  DB에 없는 파일을 정리하는 배치 잡을 두는 것이 일반적입니다.
+- img-server 자체에도 DB가 없으므로, Attachment 엔티티는 Main Application 측 DB에만 존재합니다.
+
+   #############
+
+네, 데이터 흐름은 동일합니다. 다만 "끼워 넣는다"기보다 로컬 파일 저장 부분을 img-server 호출로
+  교체하는 게 맞습니다.
+
+  현재 코드 흐름:
+
+  유효성 검사
+      ↓
+  file.transferTo(transferFile)  ← 로컬 저장
+      ↓
+  Attachment 빌드 (로컬 경로 기반)
+      ↓
+  DB 저장
+
+  img-server 적용 후:
+
+  유효성 검사
+      ↓
+  imgServerClient.upload(file, project)  ← HTTP 호출로 교체
+      ↓ { fileName, url } 반환
+  Attachment 빌드 (반환값 기반)
+      ↓
+  DB 저장
+
+  즉 originalDir.mkdirs(), file.transferTo(), 경로 계산 로직은 img-server가 담당하므로 제거하고, 그
+  자리에 RestTemplate/WebClient 호출을 넣으면 됩니다.
+
+  맞습니다. 조회(다운로드/미리보기)는 Nginx가 직접 처리하는 게 핵심입니다.
+
+   실제 흐름
+
+   업로드:
+   Client → Main App → img-server(Spring) → 디스크 저장
+                                           → { fileName, url } 반환
+            Main App → DB 저장
+
+   조회 (Nginx 직접 서빙):
+   Client → Nginx → 디스크에서 파일 직접 응답
+                    (Spring Boot 관여 없음)
+
+   Nginx 역할
+
+   /var/www/images/     ← img-server가 여기 저장
+          └── project/2026/02/21/uuid.jpg
+
+   Nginx:
+     location /uploads/ {
+         root /var/www/images;  ← 그냥 정적 파일 서빙
+     }
+
+   DB에 저장하는 realUrl이 결국 Nginx가 서빙하는 URL입니다.
+
+   realUrl = "https://img.example.com/uploads/project/2026/02/21/uuid.jpg"
+                                       ↑ Nginx가 직접 처리
+
+   img-server의 Spring Boot 다운로드 엔드포인트 용도
+
+   CLAUDE.md에도 명시되어 있듯이:
+
+   Spring Boot preview/download endpoints exist as fallback or for development
+
+   즉:
+   - 개발 환경: Nginx 없이 Spring Boot로 바로 테스트
+   - 접근 제어 필요 시: X-Accel-Redirect 패턴 (Main App이 권한 확인 후 Nginx에 내부 서빙 위임)
+   - 프로덕션 일반 조회: Nginx가 전담, Spring Boot 불필요
+
+   결론적으로 조회 시 Spring Boot를 거치는 건 낭비이고, Nginx가 직접 서빙하는 게 맞는 설계입니다.
+
+   #############
+
+   네, download도 조회의 일종입니다.
+
+     차이는 HTTP 헤더뿐입니다:
+
+     ┌─────────────────────┬────────────────────────┬──────────────────────────┐
+     │                     │   미리보기 (preview)   │   다운로드 (download)    │
+     ├─────────────────────┼────────────────────────┼──────────────────────────┤
+     │ Content-Disposition │ inline                 │ attachment; filename=... │
+     ├─────────────────────┼────────────────────────┼──────────────────────────┤
+     │ 브라우저 동작       │ 브라우저에서 바로 표시 │ 파일 저장 다이얼로그     │
+     ├─────────────────────┼────────────────────────┼──────────────────────────┤
+     │ 파일 자체           │ 동일                   │ 동일                     │
+     └─────────────────────┴────────────────────────┴──────────────────────────┘
+
+     Nginx에서도 둘 다 처리 가능합니다:
+
+     # 미리보기
+     location /uploads/ {
+         root /var/www/images;
+     }
+
+     # 다운로드
+     location /downloads/ {
+         root /var/www/images;
+         add_header Content-Disposition "attachment";
+     }
+
+     다만 다운로드 시 원본 파일명(originalName)을 헤더에 넣어야 하는데, Nginx는 DB를 모르기 때문에 원본
+     파일명이 필요한 경우엔 Spring Boot를 거쳐야 합니다. 이 경우 X-Accel-Redirect 패턴을 씁니다:
+
+     Client → Main App (DB에서 originalName 조회 후 X-Accel-Redirect 헤더 설정)
+            → Nginx가 실제 파일 서빙 (Spring Boot가 파일을 직접 읽지 않음)
+
+     원본 파일명이 필요 없거나 uuid 파일명으로도 충분하다면 Nginx 직접 서빙으로 끝납니다.
