@@ -26,6 +26,11 @@ import java.nio.file.Paths;
 @Slf4j
 @Service
 @ConditionalOnProperty(name = "image.storage", havingValue = "local", matchIfMissing = true)
+//      동작 원리: 설정 파일에 지정한 속성이 존재하거나, 특정 값을 가질 때만 해당 Bean을 컨테이너에 등록
+//     주요 속성:
+//     name 또는 value: 체크할 프로퍼티의 이름 (필수).
+//     havingValue: 프로퍼티가 가져야 할 비교 대상 값.
+//     matchIfMissing: 프로퍼티가 설정 파일에 없을 때 기본으로 조건 충족 여부 (기본값 false)
 public class LocalStorageService implements StorageService {
 
     @Value("${image.dir}")
